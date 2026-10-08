@@ -36,6 +36,8 @@ import { routePattern } from "./lib/route-pattern.mjs";
 import { resolveTestids } from "./lib/testids.mjs";
 import { tmuxPathFor } from "./lib/tmux-path.mjs";
 import { browserCallLimit } from "./lib/call-limit.mjs";
+import { MAX_PAGES, collectEvents, countImages } from "./lib/events-paging.mjs";
+import { redactBody, redactUrl } from "./lib/network-bodies.mjs";
 import { buildLocator, parseRole, toCss } from "./lib/selectors.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1080,4 +1082,353 @@ test("map baseline reads the index line, and map affected starts from it by defa
     encoding: "utf8",
   });
   assert.match(help.stdout, /map baseline \[--set TARGET \[--force\]\]/);
+});
+
+test("request bodies are shown with credentials and env maps redacted", () => {
+  // A stored secret sent behind its placeholder must stay recognizable as
+  // the placeholder; a real value shows only its length.
+  const body = redactBody(
+    JSON.stringify({
+      name: "qa_vault",
+      command: "/bin/sh",
+      env: { QA_VAULT_TOKEN: "qa-vault-secret-000", QA_NODE: "**********" },
+      api_key: "sk-abcdef",
+      headers: { Authorization: "Bearer x" },
+      nested: { session_api_key: "k", plain: "kept" },
+      list: [{ token: "t" }],
+    }),
+  );
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.name, "qa_vault");
+  assert.equal(parsed.command, "/bin/sh");
+  assert.equal(parsed.env.QA_VAULT_TOKEN, "<redacted 19 chars>");
+  assert.equal(parsed.env.QA_NODE, "**********");
+  assert.equal(parsed.api_key, "<redacted 9 chars>");
+  assert.equal(parsed.headers.Authorization, "<redacted 8 chars>");
+  assert.equal(parsed.nested.session_api_key, "<redacted 1 chars>");
+  assert.equal(parsed.nested.plain, "kept");
+  assert.equal(parsed.list[0].token, "<redacted 1 chars>");
+  // Form bodies redact by key; anything else is described, never shown.
+  assert.equal(redactBody("a=1&api_key=zzz"), "a=1&api_key=%3Credacted%3E");
+  assert.equal(redactBody("--boundary\r\nraw"), "<non-JSON body, 15 chars>");
+  // Secrets inside arrays, under a credential-named key, or at the top level
+  // of a credential endpoint's payload never come back in clear.
+  assert.deepEqual(
+    JSON.parse(
+      redactBody(
+        JSON.stringify({
+          env: ["TOKEN=abc123"],
+          api_keys: ["sk-live-1"],
+          credentials: { value: "p4ss", nested: ["x"] },
+          values: ["kept"],
+        }),
+      ),
+    ),
+    {
+      env: ["<redacted 12 chars>"],
+      api_keys: ["<redacted 9 chars>"],
+      credentials: {
+        value: "<redacted 4 chars>",
+        nested: ["<redacted 1 chars>"],
+      },
+      values: ["kept"],
+    },
+  );
+  assert.equal(
+    redactBody(JSON.stringify("hunter2"), { all: true }),
+    '"<redacted 7 chars>"',
+  );
+  assert.equal(
+    redactBody(JSON.stringify(["hunter2"]), { all: true }),
+    '["<redacted 7 chars>"]',
+  );
+  assert.equal(
+    redactBody("grant_type=x&code=SECRET", { all: true }),
+    "grant_type=%3Credacted%3E&code=%3Credacted%3E",
+  );
+  // A credential endpoint redacts every string, whatever the field is called.
+  assert.deepEqual(
+    JSON.parse(
+      redactBody(JSON.stringify({ name: "X", value: "v" }), { all: true }),
+    ),
+    { name: "<redacted 1 chars>", value: "<redacted 1 chars>" },
+  );
+  assert.equal(redactBody(""), undefined);
+  assert.equal(redactBody(null), undefined);
+  assert.match(
+    redactBody(JSON.stringify({ t: "x".repeat(5000) }), { limit: 50 }),
+    /…$/,
+  );
+});
+
+test("credentials carried by a URL are redacted whatever key holds the URL", () => {
+  // The MCP editor sends a remote server's URL as typed, under `server.url`
+  // (POST /api/v1/mcp/test) or `url` (a settings save): a key or a basic-auth
+  // pair the user put in the URL must not come back in clear. The rest of
+  // the URL is kept as written, so the row still proves the endpoint sent.
+  const probe = JSON.parse(
+    redactBody(
+      JSON.stringify({
+        server: {
+          type: "http",
+          url: "https://example.invalid/mcp?api_key=DUMMY_URL_API_KEY",
+          headers: { "X-Api-Key": "dummy-header-key" },
+        },
+        name: "qa-remote",
+        timeout: 30,
+      }),
+    ),
+  );
+  assert.equal(
+    probe.server.url,
+    "https://example.invalid/mcp?api_key=<redacted 17 chars>",
+  );
+  assert.equal(probe.server.headers["X-Api-Key"], "<redacted 16 chars>");
+  assert.equal(probe.name, "qa-remote");
+  const save = JSON.parse(
+    redactBody(
+      JSON.stringify({
+        name: "qa-sse",
+        type: "sse",
+        url: "https://qa:hunter2pw@example.invalid/sse?v=2&Token=t0k#frag",
+        description: "docs at https://docs.example.invalid/sse?page=1",
+      }),
+    ),
+  );
+  assert.equal(
+    save.url,
+    "https://<redacted 2 chars>:<redacted 9 chars>@example.invalid/sse?v=2&Token=<redacted 3 chars>#frag",
+  );
+  assert.equal(
+    save.description,
+    "docs at https://docs.example.invalid/sse?page=1",
+  );
+  // A URL inside prose (a prompt naming a server) is treated the same; the
+  // settings API's placeholder stays recognizable inside a URL too.
+  assert.equal(
+    JSON.parse(
+      redactBody(JSON.stringify({ content: "use https://u:p@h/x now" })),
+    ).content,
+    "use https://<redacted 1 chars>:<redacted 1 chars>@h/x now",
+  );
+  assert.equal(
+    redactUrl("https://user:**********@example.invalid/mcp"),
+    "https://<redacted 4 chars>:**********@example.invalid/mcp",
+  );
+  assert.equal(
+    redactUrl("https://sk-abc@example.invalid/mcp?secret%5Fid=s&q=kept"),
+    "https://<redacted 6 chars>@example.invalid/mcp?secret%5Fid=<redacted 1 chars>&q=kept",
+  );
+  // An unencoded `@` in a password belongs to the password: the userinfo
+  // ends at the last `@` before the path, as `new URL()` reads it.
+  assert.equal(
+    redactUrl("https://user:p@ssw0rd@example.invalid/mcp"),
+    "https://<redacted 4 chars>:<redacted 8 chars>@example.invalid/mcp",
+  );
+  assert.equal(
+    redactUrl("https://host/path?email=a@b&token=t&next=https://u:pw@other/"),
+    "https://host/path?email=a@b&token=<redacted 1 chars>&next=https://<redacted 1 chars>:<redacted 2 chars>@other/",
+  );
+  assert.equal(
+    redactUrl("http://example.invalid/mcp"),
+    "http://example.invalid/mcp",
+  );
+  assert.equal(redactUrl("a:b@c mailto:x@y"), "a:b@c mailto:x@y");
+  // A form body's URL values go through the same redaction.
+  assert.equal(
+    new URLSearchParams(
+      redactBody("name=x&url=https%3A%2F%2Fu%3Ap%40h%2Fmcp%3Fkey%3Dk"),
+    ).get("url"),
+    "https://<redacted 1 chars>:<redacted 1 chars>@h/mcp?key=<redacted 1 chars>",
+  );
+});
+
+test("conversation events reads pages until the rows asked for are in hand", async () => {
+  const pages = {
+    undefined: { items: [1, 2, 3], next_page_id: "p2" },
+    p2: { items: [4, 5], next_page_id: "p3" },
+    p3: { items: [6], next_page_id: null },
+  };
+  const calls = [];
+  const fetchPage = async (id) => {
+    calls.push(id);
+    return pages[id];
+  };
+  // Enough rows after one page: no second request.
+  assert.deepEqual(await collectEvents(fetchPage, 3), {
+    items: [1, 2, 3],
+    more: true,
+    pages: 1,
+  });
+  calls.length = 0;
+  // More rows than one page holds: follow next_page_id, stop at the end.
+  assert.deepEqual(await collectEvents(fetchPage, 500), {
+    items: [1, 2, 3, 4, 5, 6],
+    more: false,
+    pages: 3,
+  });
+  assert.deepEqual(calls, [undefined, "p2", "p3"]);
+  // A page without items or a missing body ends the walk cleanly.
+  assert.deepEqual(await collectEvents(async () => undefined, 10), {
+    items: [],
+    more: false,
+    pages: 1,
+  });
+  // A filter counts only the rows that pass it, so a kind that is rare keeps
+  // the walk going; a server that never ends paging stops at MAX_PAGES.
+  const mixed = async (id) => ({
+    items: [{ kind: "State" }, { kind: "State" }, { kind: "Message" }],
+    next_page_id:
+      id === "p3" ? null : `p${(Number(String(id).slice(1)) || 1) + 1}`,
+  });
+  const filtered = await collectEvents(mixed, 3, (e) => e.kind === "Message");
+  assert.equal(filtered.pages, 3);
+  assert.equal(filtered.items.filter((e) => e.kind === "Message").length, 3);
+  const endless = await collectEvents(
+    async () => ({ items: [{ kind: "x" }], next_page_id: "again" }),
+    1000,
+  );
+  assert.equal(endless.pages, MAX_PAGES);
+  assert.equal(endless.more, true);
+});
+
+test("image attachments are counted from a message's content blocks", () => {
+  assert.equal(countImages("plain text"), 0);
+  assert.equal(countImages(undefined), 0);
+  assert.equal(
+    countImages([
+      { type: "text", text: " " },
+      { type: "image", image_urls: ["data:image/png;base64,AAAA", "data:x"] },
+      { type: "image" },
+    ]),
+    3,
+  );
+});
+
+test("help documents the observe, bodies, tab, mode and commit additions", () => {
+  const browser = spawnSync(process.execPath, [cli, "help", "browser"], {
+    encoding: "utf8",
+  }).stdout;
+  assert.match(
+    browser,
+    /scroll \[<sel>\] \[--by PX\] \[--x PX\]\n\s+\[--observe SEL/,
+  );
+  assert.match(browser, /network .*\[--bodies\]/);
+  assert.match(browser, /tab new \[\/path\]/);
+  assert.match(browser, /wait-tab <url-regex> \[--timeout MS\] \[--new\]/);
+  const conversation = spawnSync(
+    process.execPath,
+    [cli, "help", "conversation"],
+    { encoding: "utf8" },
+  ).stdout;
+  assert.match(conversation, /images: N/);
+  assert.match(conversation, /more:true/);
+  assert.match(conversation, /prints the prompt it typed/);
+  const fixture = spawnSync(process.execPath, [cli, "help", "fixture"], {
+    encoding: "utf8",
+  }).stdout;
+  assert.match(fixture, /fixture skill .*\[--commit\]/);
+  const workspace = spawnSync(process.execPath, [cli, "help", "workspace"], {
+    encoding: "utf8",
+  }).stdout;
+  assert.match(
+    workspace,
+    /workspace open PATH\|NAME \[--stay\] \[--mode local_repo\|new_worktree\]/,
+  );
+});
+
+test("fixture skill --commit records the project skill once and reports a re-run", () => {
+  // A stopped run directory is enough for fixtures: they only need run.json.
+  const dir = mkdtempSync(join(tmpdir(), "cov-run-"));
+  mkdirSync(join(dir, "private"));
+  writeFileSync(join(dir, "private", "session-key"), "x".repeat(64));
+  writeFileSync(
+    join(dir, "run.json"),
+    JSON.stringify({
+      baseUrl: "http://127.0.0.1:9",
+      ports: { ingress: 9 },
+      launcherPgid: 0,
+    }),
+  );
+  const env = { OH_VERIFY_RUN: dir };
+  assert.equal(run(["fixture", "git-repo", "--name", "qa-t"], env).status, 0);
+  const first = run(
+    [
+      "fixture",
+      "skill",
+      "--repo",
+      "qa-t",
+      "--name",
+      "qa-t-skill",
+      "--trigger",
+      "qa-t-ping",
+      "--commit",
+    ],
+    env,
+  );
+  assert.equal(first.status, 0, first.stdout);
+  assert.equal(first.json.scope, "project");
+  assert.match(first.json.committed.sha, /^[0-9a-f]{40}$/);
+  assert.equal(first.json.committed.message, "Add qa-t-skill skill");
+  const log = spawnSync(
+    "git",
+    ["-C", join(dir, "workspace", "qa-t"), "log", "--format=%s"],
+    {
+      encoding: "utf8",
+    },
+  )
+    .stdout.trim()
+    .split("\n");
+  assert.deepEqual(log, ["Add qa-t-skill skill", "Initial fixture commit"]);
+  // The same command again changes nothing and says so.
+  const again = run(
+    [
+      "fixture",
+      "skill",
+      "--repo",
+      "qa-t",
+      "--name",
+      "qa-t-skill",
+      "--trigger",
+      "qa-t-ping",
+      "--commit",
+    ],
+    env,
+  );
+  assert.equal(again.status, 0, again.stdout);
+  assert.equal(again.json.committed.sha, first.json.committed.sha);
+  assert.equal(again.json.committed.unchanged, true);
+  // Only the skill's path is committed: a file staged beforehand stays staged.
+  const repo = join(dir, "workspace", "qa-t");
+  writeFileSync(join(repo, "other.txt"), "staged elsewhere\n");
+  spawnSync("git", ["-C", repo, "add", "other.txt"]);
+  const third = run(
+    ["fixture", "skill", "--repo", "qa-t", "--name", "qa-v", "--commit"],
+    env,
+  );
+  assert.equal(third.status, 0, third.stdout);
+  const files = spawnSync(
+    "git",
+    ["-C", repo, "show", "--name-only", "--format=", "HEAD"],
+    { encoding: "utf8" },
+  ).stdout.trim();
+  assert.equal(files, ".agents/skills/qa-v/SKILL.md");
+  const staged = spawnSync(
+    "git",
+    ["-C", repo, "diff", "--cached", "--name-only"],
+    {
+      encoding: "utf8",
+    },
+  ).stdout.trim();
+  assert.equal(staged, "other.txt");
+  // Without --commit nothing is recorded; a personal skill cannot be committed.
+  const plain = run(
+    ["fixture", "skill", "--repo", "qa-t", "--name", "qa-u"],
+    env,
+  );
+  assert.equal(plain.status, 0);
+  assert.equal(plain.json.committed, undefined);
+  const personal = run(["fixture", "skill", "--name", "qa-p", "--commit"], env);
+  assert.equal(personal.status, 2);
+  assert.match(personal.json.error, /needs --repo/);
 });

@@ -21,6 +21,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { redactStorage } from "./lib/redact-storage.mjs";
+import { SECRET_KEY, SECRET_PATH, redactBody } from "./lib/network-bodies.mjs";
 import { buildLocator, toCss } from "./lib/selectors.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -172,8 +173,7 @@ function redactQuery(search) {
   if (!search) return "";
   const params = new URLSearchParams(search);
   for (const key of [...params.keys()]) {
-    if (/key|token|secret|auth|pass|session|sig/i.test(key))
-      params.set(key, "<redacted>");
+    if (SECRET_KEY.test(key)) params.set(key, "<redacted>");
   }
   const text = params.toString();
   return text ? `?${text.slice(0, 200)}` : "";
@@ -234,6 +234,19 @@ function watch(page) {
       return;
     }
     if (!origin.startsWith("http") && !origin.startsWith("ws")) return;
+    // The body of an app-origin write, redacted (see lib/network-bodies.mjs);
+    // `network --bodies` shows it, so a recipe can prove what the page sent.
+    let body;
+    if (
+      origin === baseUrl.origin &&
+      /^(POST|PUT|PATCH|DELETE)$/.test(request.method())
+    ) {
+      try {
+        body = redactBody(request.postData(), { all: SECRET_PATH.test(path) });
+      } catch {
+        body = undefined;
+      }
+    }
     const entry = {
       ts: new Date().toISOString(),
       origin,
@@ -242,6 +255,7 @@ function watch(page) {
       method: request.method(),
       type: request.resourceType(),
       app: origin === baseUrl.origin,
+      body,
     };
     requestEntries.set(request, entry);
     requests.push(entry);
@@ -296,6 +310,172 @@ context.on("page", (page) => {
   watch(page);
   record("page-opened", page, { url: page.url() });
 });
+
+// Transient states (labels such as "Saving...", a loading row) of the
+// elements an `--observe` selector names, while an action's effects play
+// out: an in-page MutationObserver when the selector is plain CSS/testid,
+// else polling every 20 ms. `startObserver` before the action,
+// `finishObserver` after it.
+async function startObserver(observe) {
+  if (!observe) return undefined;
+  let observer;
+  let poller;
+  const css = toCss(observe);
+  if (css) {
+    observer = await activePage
+      .evaluateHandle((sel) => {
+        document.querySelectorAll(sel);
+        const log = [];
+        const snap = () => {
+          const els = [...document.querySelectorAll(sel)];
+          // Text plus disabled/busy markers, so pending states show up.
+          const entry = els.length
+            ? els.map(
+                (e) =>
+                  (e.innerText || e.value || "").trim().slice(0, 80) +
+                  (e.disabled || e.getAttribute("aria-disabled") === "true"
+                    ? " [disabled]"
+                    : "") +
+                  (e.getAttribute("aria-busy") === "true" ? " [busy]" : ""),
+              )
+            : ["<absent>"];
+          const key = JSON.stringify(entry);
+          if (log[log.length - 1]?.key !== key) {
+            log.push({ key, t: Math.round(performance.now()) });
+          }
+        };
+        snap();
+        const mo = new MutationObserver(snap);
+        mo.observe(document.body, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+        });
+        return { log, mo };
+      }, css)
+      .catch(() => undefined);
+  }
+  if (!observer) {
+    const log = [];
+    const t0 = Date.now();
+    poller = { log, running: true };
+    poller.done = (async () => {
+      while (poller.running) {
+        let entry;
+        try {
+          const loc = locate(observe);
+          entry = (await loc.count())
+            ? (await loc.allInnerTexts()).map((s) => s.trim().slice(0, 80))
+            : ["<absent>"];
+        } catch {
+          entry = ["<unreadable>"];
+        }
+        const key = JSON.stringify(entry);
+        if (log[log.length - 1]?.key !== key)
+          log.push({ key, t: Date.now() - t0 });
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    })();
+  }
+  return { observer, poller };
+}
+
+// The action failed: stop watching without a report, so the poller does not
+// outlive the request and the page's MutationObserver is disconnected.
+async function abandonObserver(watching) {
+  if (!watching) return;
+  const { observer, poller } = watching;
+  if (observer)
+    await observer.evaluate(({ mo }) => mo.disconnect()).catch(() => {});
+  if (poller) {
+    poller.running = false;
+    await poller.done.catch(() => {});
+  }
+}
+
+async function finishObserver(watching, observeMs) {
+  if (!watching) return {};
+  const { observer, poller } = watching;
+  await activePage.waitForTimeout(Number(observeMs ?? 3000));
+  let observed;
+  if (observer) {
+    observed = await observer.evaluate(({ log, mo }) => {
+      mo.disconnect();
+      const start = log[0]?.t ?? 0;
+      return log.map((l) => ({ ms: l.t - start, state: JSON.parse(l.key) }));
+    });
+  } else {
+    poller.running = false;
+    await poller.done;
+    observed = poller.log.map((l) => ({
+      ms: l.t,
+      state: JSON.parse(l.key),
+    }));
+  }
+  return { observed, observedBy: observer ? "mutation" : "poll-20ms" };
+}
+
+// One scroll, as `browser scroll` asked for it: a horizontal rail, the
+// nearest scrollable container of an element, an element into view, or the
+// wheel at the pointer.
+async function scrollOnce({ selector, by, x, timeout }) {
+  if (selector && x !== undefined) {
+    // Horizontal rails: scroll the nearest horizontally scrollable box.
+    return locate(selector)
+      .first()
+      .evaluate((el, dx) => {
+        let node = el;
+        while (
+          node &&
+          !(
+            node.scrollWidth > node.clientWidth &&
+            /auto|scroll/.test(getComputedStyle(node).overflowX)
+          )
+        ) {
+          node = node.parentElement;
+        }
+        const target = node || document.scrollingElement;
+        target.scrollBy(dx, 0);
+        return {
+          scrolled: target === document.scrollingElement ? "page" : "container",
+          scrollLeft: Math.round(target.scrollLeft),
+          scrollWidth: target.scrollWidth,
+        };
+      }, Number(x));
+  }
+  if (selector && by !== undefined) {
+    // Scroll the element's nearest scrollable container (settings and
+    // panels scroll inside a container, not the window).
+    return locate(selector)
+      .first()
+      .evaluate((el, dy) => {
+        let node = el;
+        while (
+          node &&
+          !(
+            node.scrollHeight > node.clientHeight &&
+            /auto|scroll/.test(getComputedStyle(node).overflowY)
+          )
+        ) {
+          node = node.parentElement;
+        }
+        const target = node || document.scrollingElement;
+        target.scrollBy(0, dy);
+        return {
+          scrolled: target === document.scrollingElement ? "page" : "container",
+          scrollTop: Math.round(target.scrollTop),
+          scrollHeight: target.scrollHeight,
+        };
+      }, Number(by));
+  }
+  if (selector) {
+    await locate(selector).scrollIntoViewIfNeeded({ timeout });
+    return { scrolled: "into-view" };
+  }
+  await activePage.mouse.wheel(0, Number(by ?? 600));
+  return { scrolled: "wheel at mouse position" };
+}
 
 function locate(selector) {
   return buildLocator(activePage, selector);
@@ -445,114 +625,38 @@ const handlers = {
     observeMs,
   }) {
     const before = activePage.url();
-    // Record transient states (labels such as "Saving...", skeletons) of the
-    // observed elements while the click's effects play out: an in-page
-    // MutationObserver when the selector is plain CSS/testid, else polling.
-    let observer;
-    let poller;
-    const css = observe ? toCss(observe) : null;
-    if (css) {
-      observer = await activePage
-        .evaluateHandle((sel) => {
-          document.querySelectorAll(sel);
-          const log = [];
-          const snap = () => {
-            const els = [...document.querySelectorAll(sel)];
-            // Text plus disabled/busy markers, so pending states show up.
-            const entry = els.length
-              ? els.map(
-                  (e) =>
-                    (e.innerText || e.value || "").trim().slice(0, 80) +
-                    (e.disabled || e.getAttribute("aria-disabled") === "true"
-                      ? " [disabled]"
-                      : "") +
-                    (e.getAttribute("aria-busy") === "true" ? " [busy]" : ""),
-                )
-              : ["<absent>"];
-            const key = JSON.stringify(entry);
-            if (log[log.length - 1]?.key !== key) {
-              log.push({ key, t: Math.round(performance.now()) });
-            }
-          };
-          snap();
-          const mo = new MutationObserver(snap);
-          mo.observe(document.body, {
-            subtree: true,
-            childList: true,
-            characterData: true,
-            attributes: true,
-          });
-          return { log, mo };
-        }, css)
-        .catch(() => undefined);
-    }
-    if (observe && !observer) {
-      const log = [];
-      const t0 = Date.now();
-      poller = { log, running: true };
-      poller.done = (async () => {
-        while (poller.running) {
-          let entry;
-          try {
-            const loc = locate(observe);
-            entry = (await loc.count())
-              ? (await loc.allInnerTexts()).map((s) => s.trim().slice(0, 80))
-              : ["<absent>"];
-          } catch {
-            entry = ["<unreadable>"];
-          }
-          const key = JSON.stringify(entry);
-          if (log[log.length - 1]?.key !== key)
-            log.push({ key, t: Date.now() - t0 });
-          await new Promise((r) => setTimeout(r, 20));
-        }
-      })();
-    }
-    if (hoverFirst) {
-      // Hover-driven controls re-render on pointerenter and swallow a click
-      // that moves and presses at once.
-      await locate(selector).hover({ timeout });
-      await activePage.waitForTimeout(Number(hoverFirst) || 150);
-    }
-    await locate(selector).click({
-      timeout,
-      force,
-      button,
-      modifiers,
-      position,
-    });
-    if (expectUrl) {
-      await activePage.waitForURL(new RegExp(expectUrl), { timeout });
-    }
-    if (expectNewUrl) {
-      const re = new RegExp(expectNewUrl);
-      await activePage.waitForURL(
-        (u) => u.toString() !== before && re.test(u.toString()),
-        { timeout },
-      );
-    }
-    let observed;
-    if (observer || poller) {
-      await activePage.waitForTimeout(Number(observeMs ?? 3000));
-    }
-    if (observer) {
-      observed = await observer.evaluate(({ log, mo }) => {
-        mo.disconnect();
-        const start = log[0]?.t ?? 0;
-        return log.map((l) => ({ ms: l.t - start, state: JSON.parse(l.key) }));
+    const watching = await startObserver(observe);
+    try {
+      if (hoverFirst) {
+        // Hover-driven controls re-render on pointerenter and swallow a click
+        // that moves and presses at once.
+        await locate(selector).hover({ timeout });
+        await activePage.waitForTimeout(Number(hoverFirst) || 150);
+      }
+      await locate(selector).click({
+        timeout,
+        force,
+        button,
+        modifiers,
+        position,
       });
-    } else if (poller) {
-      poller.running = false;
-      await poller.done;
-      observed = poller.log.map((l) => ({
-        ms: l.t,
-        state: JSON.parse(l.key),
-      }));
+      if (expectUrl) {
+        await activePage.waitForURL(new RegExp(expectUrl), { timeout });
+      }
+      if (expectNewUrl) {
+        const re = new RegExp(expectNewUrl);
+        await activePage.waitForURL(
+          (u) => u.toString() !== before && re.test(u.toString()),
+          { timeout },
+        );
+      }
+    } catch (error) {
+      await abandonObserver(watching);
+      throw error;
     }
     return {
       url: activePage.url(),
-      observed,
-      observedBy: observe ? (observer ? "mutation" : "poll-20ms") : undefined,
+      ...(await finishObserver(watching, observeMs)),
     };
   },
   async dblclick({ selector, timeout, modifiers }) {
@@ -625,64 +729,18 @@ const handlers = {
     await locate(selector).setInputFiles(files, { timeout });
     return { files };
   },
-  async scroll({ selector, by, x, timeout }) {
-    if (selector && x !== undefined) {
-      // Horizontal rails: scroll the nearest horizontally scrollable box.
-      return locate(selector)
-        .first()
-        .evaluate((el, dx) => {
-          let node = el;
-          while (
-            node &&
-            !(
-              node.scrollWidth > node.clientWidth &&
-              /auto|scroll/.test(getComputedStyle(node).overflowX)
-            )
-          ) {
-            node = node.parentElement;
-          }
-          const target = node || document.scrollingElement;
-          target.scrollBy(dx, 0);
-          return {
-            scrolled:
-              target === document.scrollingElement ? "page" : "container",
-            scrollLeft: Math.round(target.scrollLeft),
-            scrollWidth: target.scrollWidth,
-          };
-        }, Number(x));
+  async scroll({ selector, by, x, timeout, observe, observeMs }) {
+    // `--observe SEL` records what SEL shows while the scroll's effects
+    // play out (a loading row, a fetched page), as `click --observe` does.
+    const watching = await startObserver(observe);
+    let result;
+    try {
+      result = await scrollOnce({ selector, by, x, timeout });
+    } catch (error) {
+      await abandonObserver(watching);
+      throw error;
     }
-    if (selector && by !== undefined) {
-      // Scroll the element's nearest scrollable container (settings and
-      // panels scroll inside a container, not the window).
-      return locate(selector)
-        .first()
-        .evaluate((el, dy) => {
-          let node = el;
-          while (
-            node &&
-            !(
-              node.scrollHeight > node.clientHeight &&
-              /auto|scroll/.test(getComputedStyle(node).overflowY)
-            )
-          ) {
-            node = node.parentElement;
-          }
-          const target = node || document.scrollingElement;
-          target.scrollBy(0, dy);
-          return {
-            scrolled:
-              target === document.scrollingElement ? "page" : "container",
-            scrollTop: Math.round(target.scrollTop),
-            scrollHeight: target.scrollHeight,
-          };
-        }, Number(by));
-    }
-    if (selector) {
-      await locate(selector).scrollIntoViewIfNeeded({ timeout });
-      return { scrolled: "into-view" };
-    }
-    await activePage.mouse.wheel(0, Number(by ?? 600));
-    return { scrolled: "wheel at mouse position" };
+    return { ...result, ...(await finishObserver(watching, observeMs)) };
   },
   async wait({ selector, state, timeout }) {
     await locate(selector)
@@ -901,13 +959,16 @@ const handlers = {
     }, expression);
     return { value };
   },
-  async "wait-tab"({ pattern, timeout }) {
-    // window.open pages appear a moment after the click.
+  async "wait-tab"({ pattern, timeout, excludeActive }) {
+    // window.open pages appear a moment after the click. With
+    // `--new` the page the daemon is on does not count, so a second tab at
+    // the current URL can be waited for.
     const re = new RegExp(pattern);
+    const skip = excludeActive ? activePage : null;
     const deadline = Date.now() + (timeout ?? 10_000);
     while (Date.now() < deadline) {
       const pages = context.pages();
-      const index = pages.findIndex((p) => re.test(p.url()));
+      const index = pages.findIndex((p) => p !== skip && re.test(p.url()));
       if (index >= 0) return { index, url: pages[index].url() };
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -915,6 +976,31 @@ const handlers = {
     throw new Error(
       `No tab matching ${pattern} within the timeout. Open tabs: ${open.join(" | ")} (a pop-up that stays about:blank could not load its URL)`,
     );
+  },
+  async "new-tab"({ target, allowExternal }) {
+    // A plain new tab, as a user opening the app in a second tab: no
+    // opener, no sessionStorage, the localStorage of the same profile.
+    // Resolve the target first: a refused URL must not leave a blank tab
+    // open and active.
+    const url = target ? assertAppUrl(target, allowExternal) : undefined;
+    const previous = activePage;
+    const page = await context.newPage();
+    activePage = page;
+    if (url) {
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded" });
+      } catch (error) {
+        // A navigation that fails (the stack is down) closes the tab it
+        // opened and leaves the daemon on the tab it was on.
+        activePage = previous;
+        await page.close().catch(() => {});
+        throw error;
+      }
+      await page
+        .waitForLoadState("networkidle", { timeout: 10_000 })
+        .catch(() => {});
+    }
+    return { index: context.pages().indexOf(page), url: page.url() };
   },
   async tabs() {
     return {
@@ -1017,7 +1103,7 @@ const handlers = {
     if (keysOnly !== false) return { area, keys: Object.keys(data).sort() };
     return { area, storage: redactStorage(data) };
   },
-  async network({ clear, external, last, filter }) {
+  async network({ clear, external, last, filter, bodies }) {
     const re = filter ? new RegExp(filter) : null;
     const list = requests.filter(
       (r) =>
@@ -1029,7 +1115,9 @@ const handlers = {
     const result = {
       total: list.length,
       byOrigin,
-      recent: list.slice(-Number(last ?? 15)),
+      recent: list
+        .slice(-Number(last ?? 15))
+        .map(({ body, ...rest }) => (bodies ? { ...rest, body } : rest)),
     };
     if (clear) requests.length = 0;
     return result;
