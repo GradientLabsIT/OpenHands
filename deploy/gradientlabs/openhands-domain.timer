@@ -1,0 +1,11 @@
+[Unit]
+Description=Check OpenHands DNS activation and certificate renewal
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20
+Persistent=true
+
+[Install]
+WantedBy=timers.target

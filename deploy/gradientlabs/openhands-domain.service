@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenHands private hostname certificate and gateway
+After=network-online.target tailscaled.service caddy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openhands-domain
+Environment=HOME=/root
+RuntimeDirectory=openhands-tls
+RuntimeDirectoryMode=0700
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+TimeoutStartSec=300

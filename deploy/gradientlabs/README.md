@@ -58,6 +58,21 @@ uv run --no-project python deploy/gradientlabs/verify-assets.py --run "$OH_VERIF
 
 Require zero asset failures and zero page/HTTP 502 errors. Repeat the fresh-browser flow after a full VM reboot without rerunning the gateway installer, then verify persisted conversations. A warm browser can hide missing JavaScript modules and does not replace this check.
 
+## Private custom hostname
+
+The `openhands.gradientlabs.it` A record points to the existing platform Tailscale address, `100.87.94.92`. Access requires Tailscale. The DigitalOcean zone contains the copied Squarespace records, but registrar-level nameserver delegation must be effective before certificate issuance.
+
+Install the custom hostname gateway with:
+
+```sh
+uv run --no-project python deploy/gradientlabs/configure-domain.py
+uv run --no-project python deploy/gradientlabs/test_domain_gateway.py
+```
+
+The platform's `openhands-domain.timer` checks every five minutes. It waits until both Cloudflare and Google resolvers report the three DigitalOcean nameservers and the expected OpenHands A record. It then issues an independent Let's Encrypt certificate through Certbot's DigitalOcean DNS plugin and enables a Caddy reverse proxy to the existing loopback gateway. Existing routes and certificates remain intact. The custom URL is `https://openhands.gradientlabs.it/canvas`; do not declare it live until DNS resolution, certificate validation, and authenticated backend access succeed.
+
+The timer renews this certificate within 30 days of expiration. Its Certbot state is isolated under `/var/lib/openhands-tls`, outside the shared Certbot renewal configuration. Provider credentials come directly from the platform's `gradientlabs` Vault grant into a mode-0600 temporary file under `/run`, removed when Certbot exits. No provider token is stored in the repository or durable renewal state. Vault availability and DNS API permissions are required for issuance and renewal. Failed certificate requests impose a six-hour retry delay to avoid repeated validation failures. Inspect `journalctl -u openhands-domain.service` for activation or renewal failures; after fixing a failure, an operator may remove `/var/lib/openhands-tls/last-issuance-failure` and restart the service to retry immediately.
+
 ## Subscription agents
 
 The active agent is now `Claude-Code-Subscription` (Claude Code via ACP, dedicated Claude Max subscription token). `Codex-Subscription` is available under Settings → Agent and uses a separate server-side ChatGPT login. These profiles have no API-key secrets or MCP integrations enabled. Existing OpenHands/LLM profiles remain available for an explicit switch; their presence on Settings → LLM does not select them for an ACP conversation. Model selection is delegated to each provider unless an override is saved in its agent profile.
