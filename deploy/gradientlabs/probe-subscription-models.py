@@ -38,8 +38,16 @@ process.exit(0);
 '''
 
 CODEX_SCRIPT = r'''
-import json, os, selectors, subprocess, time
+import base64, hashlib, json, os, selectors, subprocess, time
 from pathlib import Path
+auth = Path("/probe-auth/auth.json")
+original_hash = hashlib.sha256(auth.read_bytes()).digest()
+original_stat = auth.stat()
+access = json.loads(auth.read_text())["tokens"]["access_token"]
+claims = json.loads(base64.urlsafe_b64decode(access.split(".")[1] + "=="))
+if claims.get("exp", 0) - time.time() < 1800:
+    raise RuntimeError("Refresh the native server login before probing: access token is near expiry.")
+del access, claims
 home = Path("/tmp/codex-catalog-probe")
 home.mkdir(mode=0o700)
 (home / "auth.json").symlink_to("/probe-auth/auth.json")
@@ -78,6 +86,8 @@ try:
     if (account.get("account") or {}).get("type") != "chatgpt": raise RuntimeError("Codex does not have a ChatGPT subscription login.")
     send("model/list", {"includeHidden": False, "limit": 100}, 3)
     models = response(3).get("data", [])
+    if hashlib.sha256(auth.read_bytes()).digest() != original_hash or auth.stat().st_mtime_ns != original_stat.st_mtime_ns:
+        raise RuntimeError("Native login cache changed during the catalog probe.")
     print(json.dumps({"provider": "codex", "auth_type": "chatgpt", "models": [{key: model.get(key) for key in ["id", "model", "displayName", "supportedReasoningEfforts"]} for model in models]}))
 finally:
     process.terminate()

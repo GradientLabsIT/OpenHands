@@ -1,6 +1,6 @@
 # Gradientlabs OpenHands deployment
 
-OpenHands Agent Canvas 1.25.0 is built from the official multi-architecture image, pinned by digest in `Dockerfile`, with the subscription-login and model-catalog updates described below. The fork contains deployment and verification tooling.
+OpenHands Agent Canvas 1.26.0 is built from the official multi-architecture image, pinned by digest in `Dockerfile`, with the subscription-login and model-catalog updates described below. The fork contains deployment and verification tooling.
 
 Host: Hetzner `openhands-01-gradientlabs`, CAX41, 16 ARM vCPUs, 32 GB RAM, 320 GB SSD, Falkenstein. The observed catalog price is €40.99/month plus the primary IPv4 charge. No extra volume is provisioned. Container resources are limited to 12 CPUs and 24 GB RAM; raise those limits when measured concurrency requires it.
 
@@ -83,7 +83,7 @@ These credentials authorize use of the subscription account and are not limited 
 
 Backups containing `state` or `.env` contain authentication material: encrypt them before off-host transfer. A restored cache can contain revoked or outdated login state and require fresh authentication. Claude's root config file can be recreated on container replacement; real Claude jobs were verified after replacement. Provider history/cache retention remains manual.
 
-The deployment builds a small image from the same pinned upstream digest. Its only product patch changes Codex ACP's initial `account/read` to `refreshToken: false`: the adapter still requires an account of type `chatgpt`, and actual model requests still require valid provider authentication. The pinned adapter's forced refresh blocked for over ninety seconds despite a valid cached token and successful native Codex inference. The patch fails the build if that exact upstream function changes. Review it when updating the base image; it does not bypass provider authentication or enable an API-key fallback.
+The deployment rebuilds the frontend and applies the model-catalog updates below. Its cached-login patch changes Codex ACP's initial `account/read` to `refreshToken: false`: the adapter still requires an account of type `chatgpt`, and actual model requests still require valid provider authentication. The pinned adapter's forced refresh blocked for over ninety seconds despite a valid cached token and successful native Codex inference. The patch fails the build if that exact upstream function changes. Review it when updating the base image; it does not bypass provider authentication or enable an API-key fallback.
 
 To reconcile subscription profiles without importing or replacing credentials:
 
@@ -108,8 +108,16 @@ uv run --no-project python deploy/gradientlabs/test_model_catalog.py
 uv run --no-project python deploy/gradientlabs/probe-subscription-models.py
 ```
 
-The probe requires the candidate image to be built and both server subscriptions to be authenticated. It reads provider catalogs without inference, confirms ChatGPT authentication, and rejects model IDs or Claude alias resolutions that disagree with the displayed catalog. Credentials pass through private stdin or a read-only native cache mount. Temporary probe containers are removed even after timeout. Provider catalog availability does not prove remaining inference quota.
+The probe requires the candidate image to be built and both server subscriptions to be authenticated. It reads provider catalogs without inference, confirms ChatGPT authentication, and rejects model IDs or Claude alias resolutions that disagree with the displayed catalog. Credentials pass through private stdin or a read-only native cache mount. The Codex probe refuses a token with less than 30 minutes remaining and checks cache hash/mtime after the catalog request; refresh the native server login before retrying that refusal. This does not detect a hypothetical provider-side rotation on an unexpected 401 retry. Temporary probe containers are removed even after timeout. Provider catalog availability does not prove remaining inference quota.
 
 `install.py` runs the native probes after building and before starting the candidate. For a first installation with no authenticated subscriptions, `--skip-provider-probes` allows provisioning only; complete native authentication and rerun probes plus real UI jobs before handoff. The installer does not create backups or automatically roll back. Follow the protected backup/recovery procedure above, retain the previous image, and check for running jobs before replacement.
 
 These are pinned deployment snapshots, not automatically refreshed catalogs. For a future model release, update the runtime pins and catalog together, rebuild, verify native catalogs and perform bounded real jobs through both UI selectors. The Claude alias guard deliberately fails when an alias resolves to a newer version, requiring labels and verification to be updated together.
+
+## Automatic updates and asynchronous jobs
+
+No automatic restart or update scheduler is enabled. A blind `latest` image pull and replacement can interrupt in-flight subprocesses even though conversation state remains persisted.
+
+For the current single-container deployment, a safe updater must discover the release, pin its digest, rebuild the subscription patches, run candidate checks, close admission for new jobs and automation dispatch, and wait until existing jobs finish. It must defer an update rather than terminate a long-running job. Take a stopped consistent protected snapshot, replace the container, restore the gateway and verify a fresh browser plus real subscription jobs. On failure, restore compatible state and reauthenticate provider caches according to the rollback procedure; do not replay rotated refresh tokens. The UI will have a short maintenance interval.
+
+For updates while old jobs continue, first move execution into separately managed workers with durable dispatch. Route new jobs to new-version workers and retire old-version workers only when their jobs finish. The present shared all-in-one container does not provide that rollout boundary.

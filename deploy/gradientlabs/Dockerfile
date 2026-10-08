@@ -1,10 +1,10 @@
-ARG BASE_IMAGE=ghcr.io/openhands/agent-canvas:1.25.0@sha256:10190cdede885f74853567f4aa44b33de094139a940df75f4b204a2b6df73c57
+ARG BASE_IMAGE=ghcr.io/openhands/agent-canvas:1.26.0@sha256:ce4526401c08b47d74fd0be5ebf97e8219d6a02955cb6710e8cc3335f01291a6
 FROM ${BASE_IMAGE} AS frontend-build
 USER root
 WORKDIR /build
 COPY frontend-source.tar.gz /tmp/frontend-source.tar.gz
 RUN tar -xzf /tmp/frontend-source.tar.gz -C /build && rm /tmp/frontend-source.tar.gz
-RUN node -e 'if (require("./package.json").version !== "1.25.0") throw Error("Frontend source does not match the pinned Canvas release")' && npm ci
+RUN node -e 'if (require("./package.json").version !== "1.26.0") throw Error("Frontend source does not match the pinned Canvas release")' && npm ci
 COPY patch-model-catalog.py subscription-models.json /tmp/
 RUN python /tmp/patch-model-catalog.py --client /build/node_modules/@openhands/typescript-client/dist/models/acp-providers.json
 ENV VITE_BASE_PATH=/canvas
