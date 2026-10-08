@@ -1,6 +1,9 @@
 services:
   canvas:
-    image: ghcr.io/openhands/agent-canvas:1.25.0@sha256:10190cdede885f74853567f4aa44b33de094139a940df75f4b204a2b6df73c57
+    image: gradientlabs/openhands-canvas:1.25.0-subscriptions-1
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
@@ -11,6 +14,8 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./state:/home/openhands/.openhands
+      - ./state/acp-subscriptions/.claude:/home/openhands/.claude
+      - ./state/acp-subscriptions/.codex:/home/openhands/.codex
       - ./projects:/projects
       - ./projects:/workspace/project
     cap_drop: [ALL]

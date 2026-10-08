@@ -40,3 +40,24 @@ A fresh Chrome profile rendered login; after authentication, a bounded real job 
 The post-fix full VM reboot check also passed: the replacement proxy and application recovered automatically; a fresh browser profile rendered the connection screen, login succeeded, all 265 browser no-store asset requests returned 200, authenticated doctor passed, and a new real job finished with the expected marker. No gateway reconfiguration or model repair was run after this reboot.
 
 Independent review of the follow-up fixes completed with no Critical/High findings. Remaining Medium observations: verify Python >=3.11 for timeout semantics (the VM uses Ubuntu 24.04/Python 3.12), and keep real cold-page rendering/job checks alongside the status-based asset gate, since the asset gate alone cannot reject a hypothetical HTML fallback. The previously observed old-proxy negative control was the actual fresh-browser reproduction and host log, rather than reinstalling the broken proxy after the fix.
+
+## Subscription-agent deployment — 2026-10-08
+
+Two ACP profiles are configured: `Claude-Code-Subscription` (active, a dedicated Claude Max setup-token) and `Codex-Subscription` (a separate server device-auth ChatGPT login). Credentials are consumed privately; no provider API key or gateway override is set in the container environment. Claude's profile exposes only `CLAUDE_CODE_OAUTH_TOKEN`; Codex relies on its native persistent login cache. Both profiles disable MCP integration. Existing API-backed profiles are retained but do not drive these ACP jobs.
+
+Actual Canvas UI jobs completed with terminal output:
+
+- Claude initial native-login check: `0d835cd6-4ef0-4717-b3d1-16c8504d291a`, `CLAUDE_SUBSCRIPTION_OK`.
+- Codex cached-login patch check: `41ea9e2b-b5b4-4615-99c2-fa345595ccee`, `CODEX_SUBSCRIPTION_OK`, runtime model `gpt-6-astra`.
+- After a full container recreation: Claude `d3bbe8ca-3b67-48ed-8c84-ec39ed70d3d6`, `CLAUDE_PERSISTENCE_OK`; Codex `474a9d11-e2b4-441a-be1e-644b0eae264e`, `CODEX_PERSISTENCE_OK`.
+- After replacing diagnostic credential copies with dedicated server authentication: Claude `92ef8d90-f76e-4564-bc91-60d6629c0961`, `CLAUDE_DEDICATED_LOGIN_OK`; Codex `0c850919-ee25-40c0-95a6-3124927db6e9`, `CODEX_DEDICATED_LOGIN_OK`.
+
+Codex initially failed with `ACPAuthRequired: ChatGPT authentication did not complete in time. Please sign in again.` Native Codex subscription inference succeeded. A direct ACP handshake reproduced a forced-refresh stall for ninety seconds despite a valid cached access token. The derived pinned image changes only `authenticateWithChatGpt` to read the cached account without forcing token refresh; the account must still be ChatGPT and provider inference must authenticate normally. The patch is build-time checked against the pinned adapter source.
+
+Service doctor passed all five remote checks. After the replacement completed, the browser HTTP/2 asset gate fetched 262 assets successfully. Expected HTTP/WebSocket 502 responses occurred while the container was being replaced; these were cleared before checking steady-state UI errors. No outage during replacement is represented as zero downtime.
+
+Initial independent review identified shared refresh-credential risk. Dedicated Claude setup-token and separate Codex device login resolved it; the diagnostic Claude cache was deleted. README explicitly documents that same-UID agents can access account-wide authentication and service secrets, so this deployment is restricted to the owner's trusted jobs. It is not a multi-tenant boundary. Stale/revoked-token negative testing, periodic provider-auth monitoring, parallel token refresh and automatic cache retention remain unverified or unimplemented; service health alone does not establish subscription quota or auth health.
+
+Final independent Claude CLI review found no unresolved Critical or High issues. Remaining Medium/Low limitations include account-wide credential exposure within the trusted single-owner runtime, stale/revoked auth detected on model use rather than a periodic monitor, unverified concurrent refresh, cache/history retention, and provider config recreation. Documentation records token lifetime and incident/rollback reauthentication. These limitations do not imply API-key fallback.
+
+Final post-review Claude job `1f1c591e-5a2a-443b-9f95-f06de0e981cf` finished with `CLAUDE_FINAL_OK` after the imported native Claude cache was removed. A bounded scan found no Claude token prefix in persisted conversation files, the preceding thirty minutes of container logs, or Docker container configuration. This scan does not establish credential isolation or cover all possible files.
