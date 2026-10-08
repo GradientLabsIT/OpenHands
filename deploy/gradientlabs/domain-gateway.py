@@ -34,6 +34,18 @@ def dns(server, name, kind):
     return set(result.stdout.lower().splitlines())
 
 
+def delegated():
+    try:
+        result = run([
+            "dig", "@a.dns.it", "gradientlabs.it", "NS", "+norecurse",
+            "+noall", "+authority", "+time=5", "+tries=1",
+        ], capture_output=True, text=True)
+    except subprocess.CalledProcessError:
+        return False
+    records = [line.lower().split() for line in result.stdout.splitlines()]
+    return {row[4] for row in records if len(row) == 5 and row[3] == "ns"} == NAMESERVERS
+
+
 def desired_route():
     return f"""http://{DOMAIN} {{
     bind 127.0.0.1 {ADDRESS}
@@ -130,10 +142,10 @@ def main():
             if recent_failure:
                 print("Certificate issuance retry delayed after a failure.")
                 return
+        if not delegated():
+            print("Waiting for DigitalOcean nameserver delegation.")
+            return
         for resolver in ("1.1.1.1", "8.8.8.8"):
-            if dns(resolver, "gradientlabs.it", "NS") != NAMESERVERS:
-                print("Waiting for DigitalOcean nameserver delegation.")
-                return
             if dns(resolver, DOMAIN, "A") != {ADDRESS}:
                 print("Waiting for the OpenHands DNS record.")
                 return

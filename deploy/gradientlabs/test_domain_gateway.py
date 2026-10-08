@@ -53,7 +53,7 @@ class DomainGatewayTests(unittest.TestCase):
     def test_pending_delegation_does_not_request_credentials_or_certificate(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(gateway, "STATE", Path(directory)), patch.object(
-                gateway, "dns", return_value={"ns-cloud-e1.googledomains.com."}
+                gateway, "delegated", return_value=False
             ), patch.object(gateway, "run") as run:
                 gateway.main()
                 run.assert_not_called()
@@ -102,7 +102,8 @@ class DomainGatewayTests(unittest.TestCase):
                 self.fail("Unexpected command")
 
             with patch.object(gateway, "STATE", Path(directory) / "state"), patch.object(
-                gateway, "dns", side_effect=lambda server, name, kind: gateway.NAMESERVERS if kind == "NS" else {gateway.ADDRESS}
+                gateway, "dns", return_value={gateway.ADDRESS}
+            ), patch.object(gateway, "delegated", return_value=True
             ), patch.object(gateway.tempfile, "TemporaryDirectory", side_effect=temporary), patch.object(
                 gateway, "run", side_effect=run
             ), patch.object(gateway, "activate") as activate:
