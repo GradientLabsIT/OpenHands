@@ -192,3 +192,17 @@ prerequisite; never substitute a mock and call it a pass.
 
 See [references/adaptation.md](references/adaptation.md) for where these ideas
 come from and what was deliberately left out.
+
+## Existing remote deployments
+
+Use `control-openhands attach --url HTTPS_URL --run NEW_DIR --api-key-file FILE`
+when verifying a deployed stack. Read its help first. The new run stores a private
+key copy, then authenticates against the existing server. `doctor` checks service
+authentication and health; use browser commands to prove the UI separately.
+Remote `stop` only closes the verifier browser; it does not stop the deployment.
+`restart` and `service` lifecycle commands are refused. Change server lifecycle
+through the deployment tooling under its own authorization.
+
+For remote runs, `workspace open` and `conversation start --workspace` take an
+absolute path on the server; folder selection is verified in the real UI instead
+of probing the verifier machine filesystem.

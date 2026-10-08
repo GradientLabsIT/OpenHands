@@ -515,6 +515,38 @@ function checkNewRunId(runId) {
   }
 }
 
+async function cmdAttach({ flags }) {
+  if (!flags.url || !flags.run || !flags["api-key-file"])
+    usage("attach needs --url, --run and --api-key-file", "control-openhands attach --url https://canvas.example.com --run DIR --api-key-file FILE");
+  const url = new URL(flags.url);
+  if (url.username || url.password || url.search || url.hash ||
+      (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname))))
+    throw new CliError("Remote verification requires HTTPS or loopback HTTP without URL credentials.", { code: 2 });
+  const dir = resolve(flags.run);
+  if (existsSync(dir))
+    throw new CliError("Verification run already exists; use its --run without attaching again.", { code: 2 });
+  const key = readFileSync(flags["api-key-file"], "utf8").trim();
+  if (!key) throw new CliError("API key file is empty.", { code: 2 });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(join(dir, "private"), { mode: 0o700 });
+  mkdirSync(join(dir, "evidence"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(dir, "private", "session-key"), key, { mode: 0o600 });
+  const run = { dir, baseUrl: url.origin, uiPath: url.pathname === "/" ? "/canvas" : url.pathname,
+    remote: true, mode: "public", ports: {}, revision: checkoutRevision(), startedAt: new Date().toISOString() };
+  saveRun(run);
+  let info;
+  try {
+    info = await http(run, "GET", "/server_info");
+    if (!info.ok) throw new CliError(`Remote authentication failed: HTTP ${info.status}`, { code: 3 });
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+  run.versions = { agentServer: info.json?.version };
+  saveRun(run);
+  out({ ok: true, run: dir, baseUrl: run.baseUrl, remote: true, versions: run.versions });
+}
+
 async function cmdLaunch({ flags }) {
   // A named run must be new: reusing its directory would overwrite the keys
   // and run.json of a run that may still be live. `restart` reuses a run.
@@ -907,6 +939,7 @@ function spawnLauncher(run) {
 }
 
 async function stopLauncher(run) {
+  if (run.remote) return { stopped: false, forced: false, remote: true };
   const pgid = run.launcherPgid;
   let forced = false;
   const serviceGroups = new Set(
@@ -950,6 +983,7 @@ async function stopLauncher(run) {
 
 async function cmdRestart({ flags }) {
   const run = loadRun(flags);
+  if (run.remote) throw new CliError("Remote deployment lifecycle is not managed by this verifier.", { code: 2 });
   if (
     !run.launcherArgs ||
     !existsSync(join(run.dir, "private", "launcher-env.json"))
@@ -1040,6 +1074,7 @@ function descendants(rootPid) {
 
 async function cmdService({ positional, flags }) {
   const run = loadRun(flags);
+  if (run.remote) throw new CliError("Remote deployment lifecycle is not managed by this verifier.", { code: 2 });
   const [sub, name] = positional;
   const procs = descendants(run.launcherPid);
   if (sub === "status") {
@@ -1115,6 +1150,24 @@ async function cmdDoctor({ flags }) {
   const add = (name, ok, detail, severity = "fail") =>
     checks.push({ name, ok, severity: ok ? "ok" : severity, detail });
 
+  if (run.remote) {
+    for (const [name, path, auth, expected] of [
+      ["unauthenticated API rejected", "/api/settings", false, 401],
+      ["authenticated settings readable", "/api/settings", true, 200],
+      ["agent-server reachable", "/server_info", true, 200],
+      ["automation healthy", "/api/automation/health", true, 200],
+      ["Canvas served", run.uiPath, false, 200],
+    ]) {
+      try {
+        const response = await http(run, "GET", path, { auth });
+        add(name, response.status === expected || (!auth && expected === 401 && response.status === 403), `status=${response.status}`);
+      } catch (error) { add(name, false, error.message); }
+    }
+    const failed = checks.filter(c => !c.ok);
+    out({ ok: !failed.length, run: run.dir, remote: true, failed, passed: checks.filter(c => c.ok).map(c => c.name) });
+    if (failed.length) process.exitCode = 3;
+    return;
+  }
   const alive = groupAlive(run.launcherPgid);
   const cmd = commandLine(run.launcherPid);
   add(
@@ -1271,7 +1324,8 @@ async function cmdStop({ flags }) {
   const ports = {};
   for (const [name, port] of Object.entries(run.ports))
     ports[name] = (await portOpen(port)) ? "still open" : "closed";
-  result.launcherStopped = !groupAlive(pgid);
+  result.launcherStopped = run.remote ? false : !groupAlive(pgid);
+  if (run.remote) result.detached = true;
   if (result.launcherStopped) {
     releaseClaim(run);
     rmSync(tmuxPathFor(run.dir), { recursive: true, force: true });
@@ -1282,7 +1336,7 @@ async function cmdStop({ flags }) {
   const evidence = listFiles(join(run.dir, "evidence"));
   result.evidenceFiles = evidence.length;
   if (flags["purge-private"]) {
-    if (!result.launcherStopped)
+    if (!result.launcherStopped && !run.remote)
       throw new CliError(
         "Refusing to purge private state while processes are alive.",
         { code: 3 },
@@ -1305,7 +1359,7 @@ async function cmdStop({ flags }) {
     ).length;
   }
   result.ok =
-    result.launcherStopped && Object.values(ports).every((v) => v === "closed");
+    (result.launcherStopped || result.detached) && Object.values(ports).every((v) => v === "closed");
   out(result);
   if (!result.ok) process.exitCode = 3;
 }
@@ -1841,12 +1895,14 @@ async function openWorkspace(run, name, { stay } = {}) {
   // A bare name resolves inside <run>/workspace, where fixtures live.
   const inRun = join(run.dir, "workspace", name);
   const path = !existsSync(name) && existsSync(inRun) ? inRun : name;
-  if (!existsSync(path))
+  if (!run.remote && !existsSync(path))
     throw new CliError(`No such folder: ${path}`, {
       code: 2,
       hint: "Create it first, for example: control-openhands fixture git-repo --name qa-repo",
     });
-  const want = realpathSync(resolve(path));
+  if (run.remote && !name.startsWith("/"))
+    throw new CliError("Remote workspaces require an absolute server path.", { code: 2 });
+  const want = run.remote ? name : realpathSync(resolve(path));
   if (!stay) await browserCall(run, "goto", { target: "/" });
   await browserCall(run, "click", {
     selector: "testid=open-workspace-button",
@@ -3753,6 +3809,14 @@ async function cmdMap({ positional, flags }) {
 // Help and dispatch.
 // ---------------------------------------------------------------------------
 const HELP = {
+  attach: `control-openhands attach --url HTTPS_URL --run NEW_DIR --api-key-file FILE
+
+Attaches to an existing deployment without managing server lifecycle. HTTPS is
+required except loopback HTTP. The private key copy stays in NEW_DIR/private.
+Doctor checks authenticated services. Verify the actual UI with browser commands.
+Stop closes only the verifier browser; --purge-private removes verifier credentials.
+Restart and service lifecycle commands are refused for remote deployments.
+`,
   login: `control-openhands login
 
 Public-mode runs only: types the run's session key into whichever prompt the UI
@@ -3786,6 +3850,7 @@ states can be driven through the UI. Bring everything back with restart.
 Usage: control-openhands <command> [args] [--run <dir>]
 
 Lifecycle
+  attach        Attach to a deployed HTTPS stack; requires --url, --run, --api-key-file
   launch        Build this checkout if needed, start an isolated stack + browser
   doctor        Read-only health check; run first and after any surprise
   status        Show the current run's ports, revision and liveness
@@ -4053,6 +4118,7 @@ check also verifies every Source: path exists and the baseline line's shape.
 };
 
 const COMMANDS = {
+  attach: cmdAttach,
   launch: cmdLaunch,
   status: cmdStatus,
   doctor: cmdDoctor,

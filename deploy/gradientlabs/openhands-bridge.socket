@@ -1,0 +1,9 @@
+[Unit]
+Description=Stable loopback OpenHands ingress
+
+[Socket]
+ListenStream=127.0.0.1:18080
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

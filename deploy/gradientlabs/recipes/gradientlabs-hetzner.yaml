@@ -1,0 +1,8 @@
+base_url: https://api.hetzner.cloud/v1
+vars:
+  token:
+    cmd: gradient-vault --vault gradientlabs get HETZNER_API_KEY
+    ttl: 0
+headers:
+  Authorization: Bearer {token}
+  Content-Type: application/json

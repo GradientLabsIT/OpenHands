@@ -1,0 +1,5 @@
+.env
+server.json
+deployment.json
+openhands-gateway.service
+__pycache__/

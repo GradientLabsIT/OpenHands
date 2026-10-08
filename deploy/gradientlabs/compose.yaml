@@ -1,0 +1,35 @@
+services:
+  canvas:
+    image: ghcr.io/openhands/agent-canvas:1.25.0@sha256:10190cdede885f74853567f4aa44b33de094139a940df75f4b204a2b6df73c57
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AGENT_CANVAS_ALLOW_LAN_SESSION_KEY: "false"
+      AUTOMATION_BASE_URL: https://platform-01-gradientlabs.tail7c4d08.ts.net:10443
+      FILE_STORE: local
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./state:/home/openhands/.openhands
+      - ./projects:/projects
+      - ./projects:/workspace/project
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 24g
+    cpus: 12
+    pids_limit: 2048
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/server_info',headers={'X-Session-API-Key':os.environ['LOCAL_BACKEND_API_KEY']}); assert urllib.request.urlopen(r,timeout=10).status==200"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 90s
+networks:
+  default:
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: 127.0.0.1

@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenHands loopback connection
+After=docker.service
+
+[Service]
+ExecStart=/opt/openhands/bridge-connect.sh
+StandardInput=socket
+StandardOutput=inherit
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
