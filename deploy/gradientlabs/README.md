@@ -1,6 +1,6 @@
 # Gradientlabs OpenHands deployment
 
-OpenHands Agent Canvas 1.25.0 is built from the official multi-architecture image, pinned by digest in `Dockerfile`, with the subscription-login patch described below. The fork contains deployment and verification tooling.
+OpenHands Agent Canvas 1.25.0 is built from the official multi-architecture image, pinned by digest in `Dockerfile`, with the subscription-login and model-catalog updates described below. The fork contains deployment and verification tooling.
 
 Host: Hetzner `openhands-01-gradientlabs`, CAX41, 16 ARM vCPUs, 32 GB RAM, 320 GB SSD, Falkenstein. The observed catalog price is €40.99/month plus the primary IPv4 charge. No extra volume is provisioned. Container resources are limited to 12 CPUs and 24 GB RAM; raise those limits when measured concurrency requires it.
 
@@ -94,3 +94,22 @@ uv run --no-project python deploy/gradientlabs/configure-subscription-agents.py
 Authenticate providers through their native login flows, never by repeatedly cloning refresh credentials from another active device. For Claude, consume `claude setup-token` output privately into the application's `CLAUDE_CODE_OAUTH_TOKEN` secret; never paste it into chat or logs. For Codex, run its native CLI on the server as the `openhands` user with `login --device-auth` and complete browser authorization. To make Claude Code active explicitly, add `--activate-claude` to the profile helper. Otherwise rerunning it preserves the selected profile. Switch agents through Settings → Agent → profile menu → Set as active.
 
 The service session key grants job execution under the subscription owner: do not distribute it to other account users. Claude's dedicated token was created on 2026-10-08 and the setup-token flow gives a one-year lifetime; schedule renewal before October 2027. On suspected compromise, stop access, revoke the provider session/token through native account controls, rotate the OpenHands session key in the vault, redeploy its environment and authenticate again. After a state rollback, discard restored provider login caches and complete fresh provider authentication rather than replaying old refresh tokens. Concurrent Codex jobs across a token-refresh boundary have not been verified; quota and auth health are not automatically monitored.
+
+## Subscription model catalog updates
+
+`subscription-models.json` is the deployment catalog for both the Python SDK registry and the generated TypeScript client. The derived image rebuilds the Canvas frontend from the committed release source, producing new asset hashes rather than rewriting minified bundles. The image records that source revision. AST-based SDK patching fails on upstream registry drift; credentials and unrelated providers remain unchanged.
+
+The pinned runtimes are Claude ACP 0.88.0 with Anthropic Agent SDK 0.3.295, and Codex ACP 2.1.1 with Codex CLI 0.162.0. Claude exposes Default, Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 through native aliases. Codex exposes GPT-6.1 Sol, GPT-6 Astra, GPT-6 Sol and GPT-6 Luna; its provider default is GPT-6.1 Sol. Existing saved model overrides and old conversations are preserved. Existing API-backed LLM profiles are not automatically migrated.
+
+Before replacing an existing instance, run:
+
+```sh
+uv run --no-project python deploy/gradientlabs/test_model_catalog.py
+uv run --no-project python deploy/gradientlabs/probe-subscription-models.py
+```
+
+The probe requires the candidate image to be built and both server subscriptions to be authenticated. It reads provider catalogs without inference, confirms ChatGPT authentication, and rejects model IDs or Claude alias resolutions that disagree with the displayed catalog. Credentials pass through private stdin or a read-only native cache mount. Temporary probe containers are removed even after timeout. Provider catalog availability does not prove remaining inference quota.
+
+`install.py` runs the native probes after building and before starting the candidate. For a first installation with no authenticated subscriptions, `--skip-provider-probes` allows provisioning only; complete native authentication and rerun probes plus real UI jobs before handoff. The installer does not create backups or automatically roll back. Follow the protected backup/recovery procedure above, retain the previous image, and check for running jobs before replacement.
+
+These are pinned deployment snapshots, not automatically refreshed catalogs. For a future model release, update the runtime pins and catalog together, rebuild, verify native catalogs and perform bounded real jobs through both UI selectors. The Claude alias guard deliberately fails when an alias resolves to a newer version, requiring labels and verification to be updated together.

@@ -57,8 +57,9 @@ ssh(platform, 'systemctl daemon-reload && systemctl enable openhands-gateway.ser
 result = dict(server, deployment_path='/opt/openhands', port=port, gateway_port=bridge_port,
               url='https://platform-01-gradientlabs.tail7c4d08.ts.net:10443/canvas',
               image_version='1.25.0', base_image_digest='sha256:10190cdede885f74853567f4aa44b33de094139a940df75f4b204a2b6df73c57',
-              image='gradientlabs/openhands-canvas:1.25.0-subscriptions-1',
-              image_id=ssh(host, "docker image inspect gradientlabs/openhands-canvas:1.25.0-subscriptions-1 --format '{{.Id}}'").decode().strip())
+              image='gradientlabs/openhands-canvas:1.25.0-subscriptions-2',
+              frontend_revision=ssh(host, "docker image inspect gradientlabs/openhands-canvas:1.25.0-subscriptions-2 --format '{{index .Config.Labels \"org.gradientlabs.frontend-revision\"}}'").decode().strip(),
+              image_id=ssh(host, "docker image inspect gradientlabs/openhands-canvas:1.25.0-subscriptions-2 --format '{{.Id}}'").decode().strip())
 result.pop('image_digest', None)
 (root / 'deployment.json').write_text(json.dumps(result, indent=2) + '\n')
 key = subprocess.check_output(['gradient-vault', '--vault', 'gradientlabs', 'get', 'OPENHANDS_SESSION_API_KEY'], text=True).strip()

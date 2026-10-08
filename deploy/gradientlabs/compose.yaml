@@ -1,6 +1,6 @@
 services:
   canvas:
-    image: gradientlabs/openhands-canvas:1.25.0-subscriptions-1
+    image: gradientlabs/openhands-canvas:1.25.0-subscriptions-2
     build:
       context: .
       dockerfile: Dockerfile

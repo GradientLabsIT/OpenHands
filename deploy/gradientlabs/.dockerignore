@@ -1,3 +1,6 @@
 **
 !Dockerfile
 !patch-codex-acp.py
+!patch-model-catalog.py
+!subscription-models.json
+!frontend-source.tar.gz

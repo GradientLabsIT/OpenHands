@@ -1,0 +1,58 @@
+{
+  "claude-code": {
+    "default_model": "default",
+    "package": "@agentclientprotocol/claude-agent-acp",
+    "version": "0.88.0",
+    "resolved_models": {
+      "fable": "claude-fable-5-1",
+      "opus": "claude-opus-5-5",
+      "sonnet": "claude-sonnet-5-5",
+      "haiku": "claude-haiku-5-5"
+    },
+    "available_models": [
+      {
+        "id": "default",
+        "label": "Default (recommended)"
+      },
+      {
+        "id": "fable",
+        "label": "Claude Fable 5.1"
+      },
+      {
+        "id": "opus",
+        "label": "Claude Opus 5.5"
+      },
+      {
+        "id": "sonnet",
+        "label": "Claude Sonnet 5.5"
+      },
+      {
+        "id": "haiku",
+        "label": "Claude Haiku 5.5"
+      }
+    ]
+  },
+  "codex": {
+    "default_model": "gpt-6.1-sol",
+    "package": "@agentclientprotocol/codex-acp",
+    "version": "2.1.1",
+    "available_models": [
+      {
+        "id": "gpt-6.1-sol",
+        "label": "GPT-6.1 Sol"
+      },
+      {
+        "id": "gpt-6-astra",
+        "label": "GPT-6 Astra"
+      },
+      {
+        "id": "gpt-6-sol",
+        "label": "GPT-6 Sol"
+      },
+      {
+        "id": "gpt-6-luna",
+        "label": "GPT-6 Luna"
+      }
+    ]
+  }
+}
