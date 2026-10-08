@@ -26,11 +26,9 @@ def ssh(target, command, data=None):
 ports = json.loads(ssh(host, 'cd /opt/openhands && PATH="$PWD:$PATH" ./dcx ports --json'))
 port = int(ports['canvas']['8000'])
 bridge_port = 18080
-ssh(host, 'command -v socat >/dev/null || (apt-get update -qq && apt-get install -y -qq socat)')
-ssh(host, 'cat > /opt/openhands/bridge-connect.sh && chmod 755 /opt/openhands/bridge-connect.sh', (root / 'bridge-connect.sh').read_bytes())
-for name in ['openhands-bridge.socket', 'openhands-bridge@.service']:
-    ssh(host, 'cat > /etc/systemd/system/' + name, (root / name).read_bytes())
-ssh(host, 'systemctl daemon-reload && systemctl enable --now openhands-bridge.socket')
+ssh(host, 'umask 077; cat > /opt/openhands/bridge.py.tmp && mv /opt/openhands/bridge.py.tmp /opt/openhands/bridge.py', (root / 'bridge.py').read_bytes())
+ssh(host, 'cat > /etc/systemd/system/openhands-bridge.service.tmp && mv /etc/systemd/system/openhands-bridge.service.tmp /etc/systemd/system/openhands-bridge.service', (root / 'openhands-bridge.service').read_bytes())
+ssh(host, "systemctl disable --now openhands-bridge.socket 2>/dev/null || true; systemctl stop 'openhands-bridge@*.service'; systemctl daemon-reload && systemctl enable openhands-bridge.service && systemctl restart openhands-bridge.service")
 public_key = ssh(platform, 'cat /root/.ssh/openhands-gateway.pub').decode().strip()
 host_key = ssh(host, 'cat /etc/ssh/ssh_host_ed25519_key.pub').decode().strip().split()[:2]
 line = f'from="62.238.24.212",command="/bin/false",restrict,port-forwarding,permitopen="127.0.0.1:{bridge_port}" {public_key}'

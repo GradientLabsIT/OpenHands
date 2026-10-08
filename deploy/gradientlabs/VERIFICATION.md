@@ -20,9 +20,23 @@ The temporary OpenHands stack on the shared Pi was removed with its own `dcx dow
 
 Remaining review observations and operational limits:
 
-- The socket bridge performs port discovery for each connection and uses systemd's default connection limits. Large concurrency should be measured before raising limits or introducing a cached ingress.
+- The asynchronous proxy permits up to 1,024 connections, caches Docker port discovery and applies shared idle and backpressure timeouts. Capacity should still be measured for intended workloads.
 - This is a trusted-team shared container; agent commands can access service environment and state. API authentication does not provide separate worker or tenant isolation.
 - Automatic off-host backups are not configured. The documented backup/recovery procedure must be used before important updates; preserve the encryption key.
 - Firewall operator/gateway addresses and provider SSH-key IDs are deployment-specific. Refresh them when network or operator access changes.
 - Repo authentication, Linear integration/webhooks and native independent-reviewer authentication for the project `task` skill remain project setup, not validated ticket automation.
 - The selected smoke-test profile uses OpenRouter `openai/gpt-4.1-mini`; production model choice and project budgets remain operator configuration.
+
+## Follow-up: fresh-browser failures
+
+A user report exposed a gap in the original verification: the browser previously used had cached JavaScript assets. A new profile reproduced a blank page with HTTP 502 errors, while single API readiness checks still passed. The host journal confirmed the socket-activated proxy dropping connections at `MaxConnections=64`.
+
+The old per-connection helpers were replaced by one asyncio TCP proxy with serialized cached port discovery, negative caching, refresh on refusal, byte-stream flow control, half-close support and shared bidirectional idle activity. Regression tests cover 160 exchanges with 80 concurrent clients, a server-push stream with a quiet client, and coalesced port refresh plus cached failures.
+
+The first-run wizard also selected an unconfigured default model profile. The shared default agent was linked to the existing `gradientlabs-default` LLM profile, and its saved LLM configuration was reactivated. `configure-default-agent.py` preserves the other agent fields and refuses to overwrite a default belonging to another agent kind.
+
+A fresh Chrome profile rendered login; after authentication, a bounded real job finished. The browser-based no-store gate fetched 265 JavaScript/CSS assets concurrently with zero failures. The error tracker reported zero page errors and zero HTTP 502 errors. A separate Python stress test with many independent TLS connections encountered request timeouts, so it was replaced by the actual browser's HTTP/2 fetch path; it was not counted as a pass.
+
+The post-fix full VM reboot check also passed: the replacement proxy and application recovered automatically; a fresh browser profile rendered the connection screen, login succeeded, all 265 browser no-store asset requests returned 200, authenticated doctor passed, and a new real job finished with the expected marker. No gateway reconfiguration or model repair was run after this reboot.
+
+Independent review of the follow-up fixes completed with no Critical/High findings. Remaining Medium observations: verify Python >=3.11 for timeout semantics (the VM uses Ubuntu 24.04/Python 3.12), and keep real cold-page rendering/job checks alongside the status-based asset gate, since the asset gate alone cannot reject a hypothetical HTML fallback. The previously observed old-proxy negative control was the actual fresh-browser reproduction and host log, rather than reinstalling the broken proxy after the fix.
